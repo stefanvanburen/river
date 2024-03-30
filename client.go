@@ -475,12 +475,16 @@ func NewClient[TTx any](driver riverdriver.Driver[TTx], config *Config) (*Client
 		client.completer = jobcompleter.NewBatchCompleter(archetype, driver.GetExecutor())
 		client.services = append(client.services, client.completer)
 
-		// In poll only mode, we don't try to initialize a notifier that uses
-		// listen/notify. Instead, each service polls for changes it's
-		// interested in. e.g. Elector polls to see if leader has expired.
-		if !config.PollOnly {
-			client.notifier = notifier.New(archetype, driver.GetListener(), client.monitor.SetNotifierStatus)
-			client.services = append(client.services, client.notifier)
+		if driver.SupportsListener() {
+			// In poll only mode, we don't try to initialize a notifier that
+			// uses listen/notify. Instead, each service polls for changes it's
+			// interested in. e.g. Elector polls to see if leader has expired.
+			if !config.PollOnly {
+				client.notifier = notifier.New(archetype, driver.GetListener(), client.monitor.SetNotifierStatus)
+				client.services = append(client.services, client.notifier)
+			}
+		} else {
+			logger.Info("Driver does not support listener; entering poll only mode")
 		}
 
 		client.elector = leadership.NewElector(archetype, driver.GetExecutor(), client.notifier, &leadership.Config{
@@ -1264,6 +1268,15 @@ func insertParamsFromArgsAndOptions(args JobArgs, insertOpts *InsertOpts) (*rive
 	}
 	if tags == nil {
 		tags = []string{}
+	} else {
+		for _, tag := range tags {
+			if len(tag) > 255 {
+				return nil, nil, errors.New("tags should be a maximum of 255 characters long")
+			}
+			if !tagRE.MatchString(tag) {
+				return nil, nil, errors.New("tags should match regex " + tagRE.String())
+			}
+		}
 	}
 
 	if priority > 4 {
@@ -1284,10 +1297,10 @@ func insertParamsFromArgsAndOptions(args JobArgs, insertOpts *InsertOpts) (*rive
 	}
 
 	insertParams := &riverdriver.JobInsertFastParams{
-		EncodedArgs: encodedArgs,
+		EncodedArgs: json.RawMessage(encodedArgs),
 		Kind:        args.Kind(),
 		MaxAttempts: maxAttempts,
-		Metadata:    metadata,
+		Metadata:    json.RawMessage(metadata),
 		Priority:    priority,
 		Queue:       queue,
 		State:       rivertype.JobStateAvailable,

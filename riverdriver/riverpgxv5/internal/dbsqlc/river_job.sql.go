@@ -442,7 +442,6 @@ func (q *Queries) JobGetStuck(ctx context.Context, db DBTX, arg *JobGetStuckPara
 const jobInsertFast = `-- name: JobInsertFast :one
 INSERT INTO river_job(
     args,
-    finalized_at,
     kind,
     max_attempts,
     metadata,
@@ -453,21 +452,19 @@ INSERT INTO river_job(
     tags
 ) VALUES (
     $1::jsonb,
-    $2,
-    $3::text,
-    $4::smallint,
-    coalesce($5::jsonb, '{}'),
-    $6::smallint,
-    $7::text,
-    coalesce($8::timestamptz, now()),
-    $9::river_job_state,
-    coalesce($10::varchar(255)[], '{}')
+    $2::text,
+    $3::smallint,
+    coalesce($4::jsonb, '{}'),
+    $5::smallint,
+    $6::text,
+    coalesce($7::timestamptz, now()),
+    $8::river_job_state,
+    coalesce($9::varchar(255)[], '{}')
 ) RETURNING id, args, attempt, attempted_at, attempted_by, created_at, errors, finalized_at, kind, max_attempts, metadata, priority, queue, state, scheduled_at, tags
 `
 
 type JobInsertFastParams struct {
 	Args        []byte
-	FinalizedAt *time.Time
 	Kind        string
 	MaxAttempts int16
 	Metadata    []byte
@@ -481,7 +478,6 @@ type JobInsertFastParams struct {
 func (q *Queries) JobInsertFast(ctx context.Context, db DBTX, arg *JobInsertFastParams) (*RiverJob, error) {
 	row := db.QueryRow(ctx, jobInsertFast,
 		arg.Args,
-		arg.FinalizedAt,
 		arg.Kind,
 		arg.MaxAttempts,
 		arg.Metadata,
@@ -511,6 +507,64 @@ func (q *Queries) JobInsertFast(ctx context.Context, db DBTX, arg *JobInsertFast
 		&i.Tags,
 	)
 	return &i, err
+}
+
+const jobInsertFastMany = `-- name: JobInsertFastMany :execrows
+INSERT INTO river_job(
+    args,
+    kind,
+    max_attempts,
+    metadata,
+    priority,
+    queue,
+    scheduled_at,
+    state,
+    tags
+) SELECT
+    unnest($1::jsonb[]),
+    unnest($2::text[]),
+    unnest($3::smallint[]),
+    unnest($4::jsonb[]),
+    unnest($5::smallint[]),
+    unnest($6::text[]),
+    unnest($7::timestamptz[]),
+    unnest($8::river_job_state[]),
+
+    -- lib/pq really, REALLY does not play nicely with multi-dimensional arrays,
+    -- so instead we pack each set of tags into a string, send them through,
+    -- then unpack them here into an array to put in each row. This isn't
+    -- necessary in the Pgx driver where copyfrom is used instead.
+    string_to_array(unnest($9::text[]), ',')
+`
+
+type JobInsertFastManyParams struct {
+	Args        [][]byte
+	Kind        []string
+	MaxAttempts []int16
+	Metadata    [][]byte
+	Priority    []int16
+	Queue       []string
+	ScheduledAt []time.Time
+	State       []RiverJobState
+	Tags        []string
+}
+
+func (q *Queries) JobInsertFastMany(ctx context.Context, db DBTX, arg *JobInsertFastManyParams) (int64, error) {
+	result, err := db.Exec(ctx, jobInsertFastMany,
+		arg.Args,
+		arg.Kind,
+		arg.MaxAttempts,
+		arg.Metadata,
+		arg.Priority,
+		arg.Queue,
+		arg.ScheduledAt,
+		arg.State,
+		arg.Tags,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const jobInsertFull = `-- name: JobInsertFull :one

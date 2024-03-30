@@ -7,7 +7,6 @@ package dbsqlc
 
 import (
 	"context"
-	"encoding/json"
 	"time"
 
 	"github.com/lib/pq"
@@ -60,7 +59,7 @@ FROM updated_job
 type JobCancelParams struct {
 	ID                int64
 	ControlTopic      string
-	CancelAttemptedAt json.RawMessage
+	CancelAttemptedAt string
 }
 
 func (q *Queries) JobCancel(ctx context.Context, db DBTX, arg *JobCancelParams) (*RiverJob, error) {
@@ -93,7 +92,7 @@ FROM river_job
 WHERE state = $1
 `
 
-func (q *Queries) JobCountByState(ctx context.Context, db DBTX, state JobState) (int64, error) {
+func (q *Queries) JobCountByState(ctx context.Context, db DBTX, state RiverJobState) (int64, error) {
 	row := db.QueryRowContext(ctx, jobCountByState, state)
 	var count int64
 	err := row.Scan(&count)
@@ -308,7 +307,7 @@ WHERE kind = $1
 type JobGetByKindAndUniquePropertiesParams struct {
 	Kind           string
 	ByArgs         bool
-	Args           []byte
+	Args           string
 	ByCreatedAt    bool
 	CreatedAtBegin time.Time
 	CreatedAtEnd   time.Time
@@ -457,7 +456,6 @@ func (q *Queries) JobGetStuck(ctx context.Context, db DBTX, arg *JobGetStuckPara
 const jobInsertFast = `-- name: JobInsertFast :one
 INSERT INTO river_job(
     args,
-    finalized_at,
     kind,
     max_attempts,
     metadata,
@@ -468,35 +466,32 @@ INSERT INTO river_job(
     tags
 ) VALUES (
     $1::jsonb,
-    $2,
-    $3::text,
-    $4::smallint,
-    coalesce($5::jsonb, '{}'),
-    $6::smallint,
-    $7::text,
-    coalesce($8::timestamptz, now()),
-    $9::river_job_state,
-    coalesce($10::varchar(255)[], '{}')
+    $2::text,
+    $3::smallint,
+    coalesce($4::jsonb, '{}'),
+    $5::smallint,
+    $6::text,
+    coalesce($7::timestamptz, now()),
+    $8::river_job_state,
+    coalesce($9::varchar(255)[], '{}')
 ) RETURNING id, args, attempt, attempted_at, attempted_by, created_at, errors, finalized_at, kind, max_attempts, metadata, priority, queue, state, scheduled_at, tags
 `
 
 type JobInsertFastParams struct {
-	Args        json.RawMessage
-	FinalizedAt *time.Time
+	Args        string
 	Kind        string
 	MaxAttempts int16
-	Metadata    json.RawMessage
+	Metadata    string
 	Priority    int16
 	Queue       string
 	ScheduledAt *time.Time
-	State       JobState
+	State       RiverJobState
 	Tags        []string
 }
 
 func (q *Queries) JobInsertFast(ctx context.Context, db DBTX, arg *JobInsertFastParams) (*RiverJob, error) {
 	row := db.QueryRowContext(ctx, jobInsertFast,
 		arg.Args,
-		arg.FinalizedAt,
 		arg.Kind,
 		arg.MaxAttempts,
 		arg.Metadata,
@@ -526,6 +521,64 @@ func (q *Queries) JobInsertFast(ctx context.Context, db DBTX, arg *JobInsertFast
 		pq.Array(&i.Tags),
 	)
 	return &i, err
+}
+
+const jobInsertFastMany = `-- name: JobInsertFastMany :execrows
+INSERT INTO river_job(
+    args,
+    kind,
+    max_attempts,
+    metadata,
+    priority,
+    queue,
+    scheduled_at,
+    state,
+    tags
+) SELECT
+    unnest($1::jsonb[]),
+    unnest($2::text[]),
+    unnest($3::smallint[]),
+    unnest($4::jsonb[]),
+    unnest($5::smallint[]),
+    unnest($6::text[]),
+    unnest($7::timestamptz[]),
+    unnest($8::river_job_state[]),
+
+    -- lib/pq really, REALLY does not play nicely with multi-dimensional arrays,
+    -- so instead we pack each set of tags into a string, send them through,
+    -- then unpack them here into an array to put in each row. This isn't
+    -- necessary in the Pgx driver where copyfrom is used instead.
+    string_to_array(unnest($9::text[]), ',')
+`
+
+type JobInsertFastManyParams struct {
+	Args        []string
+	Kind        []string
+	MaxAttempts []int16
+	Metadata    []string
+	Priority    []int16
+	Queue       []string
+	ScheduledAt []time.Time
+	State       []RiverJobState
+	Tags        []string
+}
+
+func (q *Queries) JobInsertFastMany(ctx context.Context, db DBTX, arg *JobInsertFastManyParams) (int64, error) {
+	result, err := db.ExecContext(ctx, jobInsertFastMany,
+		pq.Array(arg.Args),
+		pq.Array(arg.Kind),
+		pq.Array(arg.MaxAttempts),
+		pq.Array(arg.Metadata),
+		pq.Array(arg.Priority),
+		pq.Array(arg.Queue),
+		pq.Array(arg.ScheduledAt),
+		pq.Array(arg.State),
+		pq.Array(arg.Tags),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const jobInsertFull = `-- name: JobInsertFull :one
@@ -563,19 +616,19 @@ INSERT INTO river_job(
 `
 
 type JobInsertFullParams struct {
-	Args        json.RawMessage
+	Args        string
 	Attempt     int16
 	AttemptedAt *time.Time
 	CreatedAt   *time.Time
-	Errors      []json.RawMessage
+	Errors      []string
 	FinalizedAt *time.Time
 	Kind        string
 	MaxAttempts int16
-	Metadata    json.RawMessage
+	Metadata    string
 	Priority    int16
 	Queue       string
 	ScheduledAt *time.Time
-	State       JobState
+	State       RiverJobState
 	Tags        []string
 }
 
@@ -638,7 +691,7 @@ WHERE river_job.id = updated_job.id
 
 type JobRescueManyParams struct {
 	ID          []int64
-	Error       []json.RawMessage
+	Error       []string
 	FinalizedAt []time.Time
 	ScheduledAt []time.Time
 	State       []string
@@ -897,12 +950,12 @@ FROM updated_job
 `
 
 type JobSetStateIfRunningParams struct {
-	State               JobState
+	State               RiverJobState
 	ID                  int64
 	FinalizedAtDoUpdate bool
 	FinalizedAt         *time.Time
 	ErrorDoUpdate       bool
-	Error               json.RawMessage
+	Error               string
 	MaxAttemptsUpdate   bool
 	MaxAttempts         int16
 	ScheduledAtDoUpdate bool
@@ -962,11 +1015,11 @@ type JobUpdateParams struct {
 	AttemptedAtDoUpdate bool
 	AttemptedAt         *time.Time
 	ErrorsDoUpdate      bool
-	Errors              []json.RawMessage
+	Errors              []string
 	FinalizedAtDoUpdate bool
 	FinalizedAt         *time.Time
 	StateDoUpdate       bool
-	State               JobState
+	State               RiverJobState
 	ID                  int64
 }
 

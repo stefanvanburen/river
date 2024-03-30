@@ -171,7 +171,6 @@ LIMIT @max;
 -- name: JobInsertFast :one
 INSERT INTO river_job(
     args,
-    finalized_at,
     kind,
     max_attempts,
     metadata,
@@ -182,7 +181,6 @@ INSERT INTO river_job(
     tags
 ) VALUES (
     @args::jsonb,
-    @finalized_at,
     @kind::text,
     @max_attempts::smallint,
     coalesce(@metadata::jsonb, '{}'),
@@ -192,6 +190,33 @@ INSERT INTO river_job(
     @state::river_job_state,
     coalesce(@tags::varchar(255)[], '{}')
 ) RETURNING *;
+
+-- name: JobInsertFastMany :execrows
+INSERT INTO river_job(
+    args,
+    kind,
+    max_attempts,
+    metadata,
+    priority,
+    queue,
+    scheduled_at,
+    state,
+    tags
+) SELECT
+    unnest(@args::jsonb[]),
+    unnest(@kind::text[]),
+    unnest(@max_attempts::smallint[]),
+    unnest(@metadata::jsonb[]),
+    unnest(@priority::smallint[]),
+    unnest(@queue::text[]),
+    unnest(@scheduled_at::timestamptz[]),
+    unnest(@state::river_job_state[]),
+
+    -- lib/pq really, REALLY does not play nicely with multi-dimensional arrays,
+    -- so instead we pack each set of tags into a string, send them through,
+    -- then unpack them here into an array to put in each row. This isn't
+    -- necessary in the Pgx driver where copyfrom is used instead.
+    string_to_array(unnest(@tags::text[]), ',');
 
 -- name: JobInsertFull :one
 INSERT INTO river_job(
